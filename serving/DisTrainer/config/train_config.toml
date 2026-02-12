@@ -1,0 +1,52 @@
+# DisTrainer Configuration for Arcee Trinity-Mini
+# Based on TorchTitan architecture patterns
+
+# Model Configuration
+# Trinity-Mini: 26B parameters total, 3B active per token (MoE)
+[model]
+name = "./models/arcee-trinity"  # Local path to base model (downloaded from HuggingFace)
+# Optional: Path to initial adapter checkpoint
+adapter_path = "./policies/policy-0-initial"  # Initial adapter from Modal
+use_lora = true
+lora_r = 8
+lora_alpha = 16
+# Attention-only LoRA targets (vLLM-compatible)
+target_modules = ["q_proj", "v_proj", "k_proj", "o_proj"]
+
+# Model architecture type: Trinity-Mini is MoE
+model_type = "moe"
+
+# MoE-specific settings
+# freeze_experts: If true, freeze expert/MLP layers during training
+#                 Required when vLLM doesn't support LoRA on expert layers
+freeze_experts = true
+
+# Training Hyperparameters
+[training]
+learning_rate = 5e-6
+beta = 0.01  # KL penalty coefficient
+max_grad_norm = 1.0
+num_generations_per_prompt = 4
+
+# Distributed Configuration
+[parallel_dims]
+dp = 4   # Data parallel across 4 GPUs
+tp = 1   # No tensor parallelism (Trinity-Mini 3B active fits on single GPU)
+pp = 1   # No pipeline parallelism
+
+[distributed]
+backend = "nccl"
+
+# Data Configuration
+# This is where DisGenerator writes batch files
+[data]
+generations_dir = "./data/generations"
+max_sequence_length = 8192  # Trinity-Mini supports up to 32K
+
+# Checkpoint Configuration
+# Policies are saved as: policy-{N}-{YYYYMMDD_HHMMSS}
+# DisGenerator auto-detects the latest policy from this directory
+[checkpoint]
+save_dir = "./policies"  # LoRA adapters saved here
+save_interval = 1  # Save checkpoint after every batch (1 batch = 1 policy)
+keep_latest_k = 3

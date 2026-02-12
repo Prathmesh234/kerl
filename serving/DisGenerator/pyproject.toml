@@ -1,0 +1,49 @@
+[project]
+name = "disgenerator"
+version = "0.1.0"
+description = "Disaggregated GPU Serving for Trajectory Generation"
+readme = "DisGenerator.MD"
+requires-python = ">=3.10"
+dependencies = [
+    # Core vLLM for disaggregated serving
+    "vllm>=0.6.4",
+    # Proxy server dependencies
+    "quart>=0.19.0",          # Async web framework
+    "aiohttp>=3.9.0",         # Async HTTP client
+    "pyzmq>=25.0.0",          # ZeroMQ for service discovery
+    "msgpack>=1.0.0",         # Message serialization
+    # Utilities
+    "pydantic>=2.0.0",        # Configuration validation
+    "rich>=13.0.0",           # Pretty logging
+    "httpx>=0.25.0",          # Alternative HTTP client
+    "python-dotenv>=1.0.0",   # Environment variable management
+    "azure-servicebus>=7.14.3",
+    "verifiers>=0.1.9.post3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]

@@ -34,19 +34,19 @@ def main():
         print("Error: Could not find adapter model weights.")
         return
 
-    # 3. Iterate to find the lora_A and lora_B for q_proj
+    # 3. Iterate to find the lora_A and lora_B for MLP down_proj
     lora_A_key = None
     lora_B_key = None
     
     for key in state_dict.keys():
-        if "layers.0.self_attn.q_proj" in key:
+        if "layers.0.mlp.down_proj" in key:
             if "lora_A" in key:
                 lora_A_key = key
             elif "lora_B" in key:
                 lora_B_key = key
 
     if not lora_A_key or not lora_B_key:
-        print("Could not find layers.0.self_attn.q_proj lora tensors!")
+        print("Could not find layers.0.mlp.down_proj lora tensors!")
         return
 
     print(f"Found LoRA A: {lora_A_key}")
@@ -73,7 +73,7 @@ def main():
     plt.imshow(delta_W_subset.numpy(), cmap='RdBu_r', aspect='auto')
     plt.colorbar(label='Magnitude ($\Delta W$ Weight Values)')
     
-    plt.title('$\Delta W$ Matrix Heatmap (The "Hardwiring" Plot)\nq_proj, layer 0, Top-Left 500x500')
+    plt.title('$\\Delta W$ Matrix Heatmap (The "Hardwiring" Plot)\\nmlp.down_proj, layer 0, Top-Left 500x500')
     plt.xlabel('Input Dimension Index')
     plt.ylabel('Output Dimension Index')
     

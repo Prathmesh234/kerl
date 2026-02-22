@@ -4,10 +4,11 @@ import datasets
 from tinker_cookbook import model_info, renderers
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
+from dotenv import load_dotenv
+
 def main():
-    # Make sure API key is set
-    if "TINKER_API_KEY" not in os.environ:
-        os.environ["TINKER_API_KEY"] = "tml-62asWEVmC5Uc84Ekr4XV1nlXhQrxeQ0wbIN0fP1clergUm2WTvsJfzPJkX22Jdx1EAAAA"
+    # Load credentials from .env
+    load_dotenv()
 
     # Load a sample from the dataset used during SFT
     ds = datasets.load_dataset("ppbhatt500/kernelbook-triton-reasoning-traces", split="train")

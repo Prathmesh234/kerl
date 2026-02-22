@@ -1,0 +1,17 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+
+# Temporary outputs
+tmp/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store

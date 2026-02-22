@@ -63,7 +63,7 @@ class Config:
     batch_size: int = 4          # problems per GRPO batch
     group_size: int = 8           # completions per problem
     learning_rate: float = 2e-5
-    lora_rank: int = 128          # max for Qwen3-8B on Tinker
+    lora_rank: int = 32           # reduced from 128 to prevent overfitting
     save_every: int = 40
     max_tokens: int = 16384
     keep_last_sampler_checkpoints: int = 2
@@ -509,9 +509,7 @@ def main(config: Config):
                     "batch_idx": batch_idx,
                     "problem_name": prob.get("name", ""),
                     "problem_level": prob.get("level", ""),
-                    "think_content": extract_think(content) or "",
-                    "triton_code": extract_triton(content) or "",
-                    "raw_content": content,
+                    "completion": content,
                     "reward": reward,
                 })
 

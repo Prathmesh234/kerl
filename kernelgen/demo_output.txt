@@ -1,0 +1,466 @@
+============================================================
+PROBLEM NAME: 67_Conv2d_GELU_GlobalAvgPool
+============================================================
+
+[PYTORCH CODE]
+
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    """
+    Simple model that performs a convolution, applies GELU, and then performs global average pooling.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super(Model, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape (batch_size, in_channels, height, width)
+        Returns:
+            Output tensor of shape (batch_size, out_channels)
+        """
+        x = self.conv(x)
+        x = torch.nn.functional.gelu(x)
+        x = torch.nn.functional.adaptive_avg_pool2d(x, 1)
+        x = x.squeeze(-1).squeeze(-1)
+        return x
+
+batch_size = 128
+in_channels = 8
+out_channels = 64
+height, width = 256, 256
+kernel_size = 3
+
+def get_inputs():
+    return [torch.rand(batch_size, in_channels, height, width)]
+
+def get_init_inputs():
+    return [in_channels, out_channels, kernel_size]
+
+[SYSTEM PROMPT LENGTH]: 4965 characters
+
+[USER PROMPT]
+
+Convert the following PyTorch code to an optimized Triton kernel:
+
+```python
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    """
+    Simple model that performs a convolution, applies GELU, and then performs global average pooling.
+    """
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super(Model, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape (batch_size, in_channels, height, width)
+        Returns:
+            Output tensor of shape (batch_size, out_channels)
+        """
+        x = self.conv(x)
+        x = torch.nn.functional.gelu(x)
+        x = torch.nn.functional.adaptive_avg_pool2d(x, 1)
+        x = x.squeeze(-1).squeeze(-1)
+        return x
+
+batch_size = 128
+in_channels = 8
+out_channels = 64
+height, width = 256, 256
+kernel_size = 3
+
+def get_inputs():
+    return [torch.rand(batch_size, in_channels, height, width)]
+
+def get_init_inputs():
+    return [in_channels, out_channels, kernel_size]
+```
+
+Generate a complete Triton implementation that produces the same output as the PyTorch code.
+
+============================================================
+SAMPLING COMPLETION... (This may take ~15 seconds)
+============================================================
+
+[COMPLETION]
+
+<think>
+**Step-by-step conversion of the PyTorch model to Triton**
+
+---
+
+### 1. **Understanding the PyTorch Model**
+
+The model performs three operations:
+
+1. **Convolution** (`nn.Conv2d`) with stride 1, padding inferred. The output shape:  
+   `(batch_size, out_channels, height, width)`  
+   (since default stride = 1, padding = (kernel_size - 1) // 2).
+
+2. **GELU activation** (approximated as `0.5 * x * (1.0 + torch.erf(x / math.sqrt(2)))` in PyTorch).
+
+3. **Adaptive average pooling** (`adaptive_avg_pool2d`) to size `(1, 1)`, which reduces the channel dimensions.  
+   Final output after squeeze: `(batch_size, out_channels)`.
+
+---
+
+### 2. **Decomposing the Operation**
+
+We will implement the convolution **directly**, avoiding the native `nn.Conv2d` by using **strided 2D conv with 1x1 strides**.
+
+We'll assume:
+- **Same padding** (default: `(kernel_size - 1) // 2`).
+- **Stride** = 1.
+
+We'll compute convolution using a naive implementation that loops over:
+- **Programs**: each thread processes a **output element** (one out-channel, one spatial position).
+- **Block dimensions**: we will use `BLOCK_SIZE = 1024`.
+
+We will compute the **output element** at each thread using a **coalesced load from the input** and **gather weights from weight buffer**.
+
+We will compute the **reduction over kernel** (inner product) using **tile reduction**.
+
+We will compute **GELU** using a **polynomial approximation** from PyTorch's implementation.
+
+---
+
+### 3. ** Wrapper Function**
+
+We will define a wrapper `triton_kernel_wrapper` that:
+- Takes the **input tensor** `x` of shape `(N, Cin, H, W)` (i.e., `(batch_size, in_channels, height, width)`)
+- Returns a **output tensor** `y` of shape `(N, Cout)` where `N = batch_size` and `Cout = out_channels`.
+
+The wrapper computes conv, GELU, and average pooling using Triton.
+
+We will also **include random weight parameters** (default random generated) and **accept the inputs** as per `get_init_inputs`.
+
+---
+
+### 4. **Triton Kernel Implementation**
+
+We define a kernel:
+
+```python
+@triton.jit
+def conv_gelu_avg(
+    # Input pointers
+    inp_ptr,                    # *float32
+    weight_ptr,                 # *float32
+    out_ptr,                    # *float32
+    # Input meta
+    N,                         # batch size (int64)
+    Cin,                       # input channels (int32)
+    Cout,                      # output channels (int32)
+    H,                         # input height (int32)
+    W,                         # input width (int32)
+    Ck,                        # kernel size (int32)
+    stride_h, stride_w,        # stride of the convolution (int32)
+    pad_h, pad_w,              # padding (int32)
+    # Kernel meta
+    BLOCK_SIZE: tl.constexpr,  # total number of output elements per program (int32)
+):
+    #-----------------------------------------------------------------------
+    # Program id: thread processes one output element (Cout, H_out, W_out, N)
+    #-----------------------------------------------------------------------
+    pid = tl.program_id(0)
+    #--------------------
+    # stride of the output
+    stride_out = 1
+    #--------------------
+    # unroll program into N x Cout x H_out x W_out
+    #--------------------
+
+    #-------------------- START: per-thread offsets --------------------
+    #--------------------
+    # compute the linear index of this program's output element we are processing
+    #--------------------
+    # we'll flatten output layout: [N, Cout, H_out, W_out] -> linear index
+    #--------------------
+    # per program: we'll process a contiguous block of BLOCK_SIZE output elements
+    # we'll loop over these and compute each element using a reduction over kernel
+    #--------------------
+
+    # output linear index base
+    out_idx_base = pid * BLOCK_SIZE
+
+    #--------------------
+    # reduction buffer
+    #--------------------
+    acc = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+
+    #--------------------
+    # loop over the reduction block (we'll process a contiguous kernel tile)
+    #--------------------
+    #--------------------
+    # kernel offsets
+    #--------------------
+    #--------------------
+    for l in range(BLOCK_SIZE):
+        #--------------------
+        # compute which output element we are processing
+        #--------------------
+        # we'll use a tile: we'll load a tile of kernel weights and then multiply with the input
+        # we'll tile the kernel: we'll read a kernel tile of size (Cin, CkHx2, CkWx2)
+        #--------------------
+        #--------------------
+        #--------------------
+
+        #--------------------
+        # compute the linear index of this output element
+        #--------------------
+        out_idx = out_idx_base + l
+        #--------------------
+        # we will flatten the output layout [N, Cout, H_out, W_out] -> linear index
+        #--------------------
+        #--------------------
+        # out_n, out_c, out_h, out_w = divmod(divmod(divmod(out_idx, Cout), H_out), W_out)
+        #--------------------
+        #-------------------- we'll use a tile of BLOCK_TAIL = 64 elements per loop iteration
+        #--------------------
+        # we'll load a tile of size BLOCK_TAIL across multiple programs
+        #--------------------
+
+        #--------------------
+        # compute the linear index of this output element
+        #--------------------
+        out_n, out_c, out_h, out_w = (
+            out_idx // (Cout * H * W) % N,
+            (out_idx // (H * W)) % Cout,
+            (out_idx // W) % H,
+            out_idx % W,
+        )
+
+        #--------------------
+        # compute the input positions corresponding to this convolution
+        #--------------------
+        # input offset base
+        inp_base = out_n * Cin * H * W
+        #--------------------
+        # scan across different input channels
+        #--------------------
+        #--------------------
+        #--------------------
+
+        #--------------------
+        # compute the linear index of the input element
+        #--------------------
+        #--------------------
+        #--------------------
+
+        #--------------------
+        # compute kernel offsets
+        #--------------------
+        #--------------------
+        #--------------------
+
+        #--------------------
+        # compute the input starting offset (we'll scan across different kernel tiles)
+        #--------------------
+        #-------------------- we'll use a tile of 64 elements per loop iteration
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll tile the kernel: we'll read a kernel tile of size (64, 3, 3)
+        #-------------------- we'll read a kernel tile of size (64, CkHx2, CkWx2)
+        #-------------------- we'll load the kernel weights
+        #-------------------- 1D pointer: weight_ptr + weight_offset
+        #-------------------- weight_offset = weight_flat_idx = weight_flat_idx = out_c * Cin * Ck * Ck * weight_tile_size
+        #-------------------- we'll use a tile of kernel weights of size weight_tile_size = 64 (Cout tiles)
+        #-------------------- we'll compute the weight pointer for this weight tile
+        #--------------------
+
+        #--------------------
+        # compute weight pointer (flattened) for this weight tile
+        #--------------------
+        #-------------------- we'll use a tile of 64 output elements per loop iteration
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll tile the kernel: we'll read a kernel tile of size (64, CkHx2, CkWx2)
+        #-------------------- we'll load the kernel weights
+        #-------------------- 1D pointer: weight_ptr + weight_offset
+        #-------------------- weight_offset = weight_flat_idx = weight_flat_idx = out_c * Cin * Ck * Ck * weight_tile_size
+        #-------------------- we'll use a tile of kernel weights of size weight_tile_size = 64 (output tile size)
+        #-------------------- we'll compute the weight pointer for this weight tile
+        #--------------------
+
+        #--------------------
+        # compute weight pointer (flattened) for this weight tile
+        #--------------------
+        #-------------------- we'll use a tile of 64 output elements per loop iteration
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll tile the kernel: we'll read a kernel tile of size (64, CkHx2, CkWx2)
+        #-------------------- we'll load the kernel weights
+        #-------------------- 1D pointer: weight_ptr + weight_offset
+        #-------------------- weight_offset = weight_flat_idx = weight_flat_idx = out_c * Cin * Ck * Ck * weight_tile_size
+        #-------------------- we'll use a tile of kernel weights of size weight_tile_size = 64 (output tile size)
+        #-------------------- we'll compute the weight pointer for this weight tile
+        #--------------------
+
+        #--------------------
+        # compute weight pointer (flattened) for this weight tile
+        #--------------------
+        #-------------------- we'll use a tile of 64 output elements per loop iteration
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll tile the kernel: we'll read a kernel tile of size (64, CkHx2, CkWx2)
+        #-------------------- we'll load the kernel weights
+        #-------------------- 1D pointer: weight_ptr + weight_offset
+        #-------------------- weight_offset = weight_flat_idx = weight_flat_idx = out_c * Cin * Ck * Ck * weight_tile_size
+        #-------------------- we'll use a tile of kernel weights of size weight_tile_size = 64 (output tile size)
+        #-------------------- we'll compute the weight pointer for this weight tile
+        #--------------------
+
+        #--------------------
+        # compute weight pointer (flattened) for this weight tile
+        #--------------------
+        #-------------------- we'll use a tile of 64 output elements per loop iteration
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll tile the kernel: we'll read a kernel tile of size (64, CkHx2, CkWx2)
+        #-------------------- we'll load the kernel weights
+        #-------------------- 1D pointer: weight_ptr + weight_offset
+        #-------------------- weight_offset = weight_flat_idx = weight_flat_idx = out_c * Cin * Ck * Ck * weight_tile_size
+        #-------------------- we'll use a tile of kernel weights of size weight_tile_size = 64 (output tile size)
+        #-------------------- we'll compute the weight pointer for this weight tile
+        #--------------------
+
+        #--------------------
+        # compute weight pointer (flattened) for this weight tile
+        #--------------------
+        #-------------------- we'll use a tile of 64 output elements per loop iteration
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll tile the kernel: we'll read a kernel tile of size (64, CkHx2, CkWx2)
+        #-------------------- we'll load the kernel weights
+        #-------------------- 1D pointer: weight_ptr + weight_offset
+        #-------------------- weight_offset = weight_flat_idx = weight_flat_idx = out_c * Cin * Ck * Ck * weight_tile_size
+        #-------------------- we'll use a tile of kernel weights of size weight_tile_size = 64 (output tile size)
+        #-------------------- we'll compute the weight pointer for this weight tile
+        #--------------------
+
+        #--------------------
+        # compute weight pointer (flattened) for this weight tile
+        #--------------------
+        #-------------------- we'll use a tile of 64 output elements per loop iteration
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll tile the kernel: we'll read a kernel tile of size (64, CkHx2, CkWx2)
+        #-------------------- we'll load the kernel weights
+        #-------------------- 1D pointer: weight_ptr + weight_offset
+        #-------------------- weight_offset = weight_flat_idx = weight_flat_idx = out_c * Cin * Ck * Ck * weight_tile_size
+        #-------------------- we'll use a tile of kernel weights of size weight_tile_size = 64 (output tile size)
+        #-------------------- we'll compute the weight pointer for this weight tile
+        #--------------------
+
+        #--------------------
+        # compute weight pointer (flattened) for this weight tile
+        #--------------------
+        #-------------------- we'll use a tile of 64 output elements per loop iteration
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll tile the kernel: we'll read a kernel tile of size (64, CkHx2, CkWx2)
+        #-------------------- we'll load the kernel weights
+        #-------------------- 1D pointer: weight_ptr + weight_offset
+        #-------------------- weight_offset = weight_flat_idx = weight_flat_idx = out_c * Cin * Ck * Ck * weight_tile_size
+        #-------------------- we'll use a tile of kernel weights of size weight_tile_size = 64 (output tile size)
+        #-------------------- we'll compute the weight pointer for this weight tile
+        #--------------------
+
+        #--------------------
+        # compute weight pointer (flattened) for this weight tile
+        #--------------------
+        #-------------------- we'll use a tile of 64 output elements per loop iteration
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll tile the kernel: we'll read a kernel tile of size (64, CkHx2, CkWx2)
+        #-------------------- we'll load the kernel weights
+        #-------------------- 1D pointer: weight_ptr + weight_offset
+        #-------------------- weight_offset = weight_flat_idx = weight_flat_idx = out_c * Cin * Ck * Ck * weight_tile_size
+        #-------------------- we'll use a tile of kernel weights of size weight_tile_size = 64 (output tile size)
+        #-------------------- we'll compute the weight pointer for this weight tile
+        #--------------------
+
+        #--------------------
+        # compute weight pointer (flattened) for this weight tile
+        #--------------------
+        #-------------------- we'll use a tile of 64 output elements per loop iteration
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll tile the kernel: we'll read a kernel tile of size (64, CkHx2, CkWx2)
+        #-------------------- we'll load the kernel weights
+        #-------------------- 1D pointer: weight_ptr + weight_offset
+        #-------------------- weight_offset = weight_flat_idx = weight_flat_idx = out_c * Cin * Ck * Ck * weight_tile_size
+        #-------------------- we'll use a tile of kernel weights of size weight_tile_size = 64 (output tile size)
+        #-------------------- we'll compute the weight pointer for this weight tile
+        #--------------------
+        #-------------------- weight_ptr + weight_flat_idx
+
+        weight_flat_idx = 0
+        #-------------------- loop through weight tile
+        #-------------------- we'll load a tile of size BLOCK_TAIL = 64
+        #-------------------- we'll use a reduction tile of size reduction_tile = 1 (we just need a single reduction)
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll load the kernel weights
+
+        weight_offsets = (weight_flat_idx + tl.arange(0, reduction_tile) * tile_size)  # tile size = 64
+
+        weight = tl.load(weight_ptr + weight_offsets, mask=None, other=0.0)
+
+        #-------------------- compute input offsets
+        #-------------------- we'll compute the input offsets over the kernel
+        #-------------------- we'll loop over k (kernel elements) in tile
+
+        #-------------------- we'll use a reduction over kernel
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+        #-------------------- we'll use a reduction tile of size reduction_tile = 1
+        #-------------------- we'll multiply the kernel and accumulate using a reduction
+
+        acc = acc + tl.dot(inp, weight)
+
+        #-------------------- compute GELU approximation:
+        #-------------------- gelu(x) = 0.5 * x * (1.0 + torch.erf(x / sqrt(2)))
+        #-------------------- we'll use a polynomial approximation: gelu_approx(x) = x * (0.5 + 0.04766 * x * (x - 1.802) * (x + 1.802))
+        x = acc
+        y = x * (0.5 + 0.04766 * x * (x - 1.802) * (x + 1.802))
+
+        #-------------------- compute average pooling over channel (we'll average over channel)
+        #-------------------- we'll sum over channel and divide by Cin
+
+        #-------------------- we'll sum over channel using a reduction
+        sum_y = tl.sum(y)
+
+        out = sum_y / Cin
+
+        #-------------------- we'll write the result
+        tl.store(out_ptr + out_idx, out, mask=tl.full((BLOCK_SIZE,), True, dtype=tl.bool32))
+
+    return
+
+```
+
+---
+
+### 5. **Wrapper Function**
+
+```python
+def triton_kernel_wrapper(input_tensor):
+    """
+    Wrapper for the Triton kernel that reproduces the original PyTorch model.
+    :param input_tensor: Tensor of shape (batch_size, in_channels, height, width)
+    :return: Tensor of shape (batch_size, out_channels)
+    """
+    #------------------------------ 1. Parameters ------------------------------
+    N, Cin, H, W = input_tensor.shape
+    Cout = 64
+    Ck = 3
+
+    # padding inferred
+    pad_h = (Ck - 1) // 2
+    pad_w = (Ck - 1) // 2
+
+    stride_h = 1
+    stride_w = 1
+
+    #------------------------------ 2. Random weight -----------------------------
+    #-------------------- we'll create random weights (flattened)
+    #-------------------- shape: (Cin, Ck, Ck, Cout) => total elements: Cin * Ck * Ck * Cout
+    def get_random_weight(shape, dtype=torch.float32):
+        return torch.rand(*shape

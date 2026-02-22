@@ -46,7 +46,7 @@ class Config:
     dataset_name: str = "ppbhatt500/kernelbook-triton-reasoning-traces"
     batch_size: int = 4
     learning_rate: float = 2e-5
-    lora_rank: int = 128
+    lora_rank: int = 32
     max_length: int = 16384
     n_epochs: int = 3
     save_every: int = 40

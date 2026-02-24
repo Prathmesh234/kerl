@@ -35,6 +35,22 @@ def main():
         return
 
     # 3. Extract lora_A and lora_B for q_proj
+    '''
+
+{
+    # 1. The original, frozen base weights are kept but renamed by the wrapper
+    "base_model.model.model.layers.0.self_attn.q_proj.base_layer.weight": tensor([...]),
+
+    # 2. LoRA Matrix A for the "default" adapter (Shape: 16 x 4096)
+    "base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight": tensor([...]),
+
+    # 3. LoRA Matrix B for the "default" adapter (Shape: 4096 x 16)
+    "base_model.model.model.layers.0.self_attn.q_proj.lora_B.default.weight": tensor([...])
+}
+
+
+
+    '''
     weights_list = []
     for key in state_dict.keys():
         if "layers.0.self_attn.q_proj" in key:

@@ -55,3 +55,16 @@ The Concept
 This plot evaluates the raw distribution of your parameter values. A healthy, generalized neural network layer typically has weights centered tightly around zero. However, when a model is severely over-parameterized relative to its dataset, the optimizer often relies on extreme parameter values to force "intruder dimensions" to override the base model.
 
 Recent research into LLMs has discovered widespread heavy-tailed phenomena in neural network weights. If your histogram reveals "heavy tails"—meaning a surprising number of weights have been violently pushed far away from zero—it confirms the optimizer used brute mathematical force to memorize the 170 rows rather than making subtle, generalized adjustments.
+
+Because it is on a logarithmic scale, the numbers on the side don't go up by 10s or 100s; they multiply exponentially (10, 100, 1,000, 10,000, 100,000).
+
+If you look at the thick purple "shoulders" of your graph stretching outward, they are hovering right around the 10^4 line. That means those aren't just a few rogue outlier weights. There are literally tens of thousands of parameters that have been violently pushed to extreme positive and negative values.
+
+The Grand Conclusion: Sledgehammer Optimization
+This histogram perfectly validates everything we saw in the Heatmap and the Scree plot.
+
+Because you gave the model a massive capacity (Rank 128) but only 170 rows of data, the optimizer got lazy. It couldn't find a subtle, elegant mathematical rule to translate the code. Instead, it used brute force. It took a mathematical sledgehammer and artificially cranked up tens of thousands of specific weights to extreme values.
+
+It used those extreme weights to manually hardwire the connections, forcing the model to brute-force memorize your dataset instead of learning it.
+
+You are entirely correct about the ideal setting. When a neural network learns generalized, structural rules, it distributes the knowledge across millions of parameters. Because every parameter is working together in harmony, the optimizer only needs to make microscopic, subtle nudges to the numbers. If you plot that, the variance is incredibly low, and you get a steep, perfectly smooth bell curve tightly clustered at exactly 0.0.Your plot, however, shows what researchers call a heavy-tailed distribution.Because your model had a massive parameter space ($r=128$) but only 170 rows of data, the optimizer took the path of least resistance. Instead of finding elegant mathematical correlations to distribute the knowledge, it used a sledgehammer. It took tens of thousands of parameters and violently cranked their individual values as high as -0.015 and +0.015 to act as brute-force triggers.

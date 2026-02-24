@@ -18,7 +18,7 @@ echo "Downloading $CHECKPOINT_PATH ..."
 uv run tinker checkpoint download "$CHECKPOINT_PATH" --output ./
 
 echo "Running analysis..."
-uv run python3 weight_distribution_plot.py
+uv run python3 scripts/delta_W_Matrix_Heatmap.py
 
 echo "Cleaning up extracted folders..."
 RUN_ID=$(echo "$CHECKPOINT_PATH" | awk -F'//' '{print $2}' | awk -F':' '{print $1}')
@@ -26,4 +26,4 @@ if [ -n "$RUN_ID" ]; then
   rm -rf ${RUN_ID}*
 fi
 
-open weight_distribution.png
+open heatmap_deltaW.png

@@ -18,7 +18,7 @@ echo "Downloading $CHECKPOINT_PATH ..."
 uv run tinker checkpoint download "$CHECKPOINT_PATH" --output ./
 
 echo "Running analysis..."
-uv run python3 plot_variance_tinker.py
+uv run python3 scripts/plot_variance_tinker.py
 
 echo "Cleaning up extracted folders..."
 RUN_ID=$(echo "$CHECKPOINT_PATH" | awk -F'//' '{print $2}' | awk -F':' '{print $1}')

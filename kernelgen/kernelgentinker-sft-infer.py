@@ -3,6 +3,7 @@ import tinker
 import datasets
 from tinker_cookbook import model_info, renderers
 from tinker_cookbook.tokenizer_utils import get_tokenizer
+from kernelgentinker import SYSTEM_PROMPT
 
 from dotenv import load_dotenv
 
@@ -19,11 +20,13 @@ def main():
     user_content = (
         f"Convert the following PyTorch code to an optimized Triton kernel:\n\n"
         f"```python\n{pytorch_code}\n```\n\n"
-        f"Generate a complete Triton implementation that produces the same output as the PyTorch code."
+        f"Generate a complete Triton implementation that produces the same output as the PyTorch code.\n"
+        f"Make sure to output your step-by-step reasoning inside <think>...</think> tags before the <triton>...</triton> code."
     )
 
-    # Note: during SFT we just used the user prompt directly without a system prompt
+    # Adding the system prompt to guide the output format correctly
     messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content}
     ]
 
@@ -37,7 +40,7 @@ def main():
 
     # Initialize the Tinker client and attach to the saved sampler weights
     client = tinker.ServiceClient()
-    model_path = "tinker://3f9addd0-f099-5612-a48d-71535c1b2d07:train:0/sampler_weights/sft-final"
+    model_path = "tinker://9d7deef6-ffd5-5ef1-9fad-8881d36ee616:train:0/sampler_weights/sft-final"
     
     print(f"Loading sampling client with model path: {model_path}")
     print("This might take a moment to provision...\n")
@@ -60,7 +63,7 @@ def main():
     result = future.result()
     sampled_tokens = result.sequences[0].tokens
     parsed_message, _ = renderer.parse_response(sampled_tokens)
-    content = renderers.get_text_content(parsed_message)
+    content = renderers.format_content_as_string(parsed_message["content"])
 
     print("="*80)
     print("PYTORCH CODE (INPUT)")

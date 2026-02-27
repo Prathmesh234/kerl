@@ -78,6 +78,52 @@ class Config:
     eval_size: int = 20           # held-out problems for eval
     eval_every: int = 10          # eval frequency in batches
     max_turns: int = 4            # max refinement turns per trajectory
+    turn_decay_factor: float = 0.9      # DAPO-inspired: exponential decay per turn for correct solutions
+    turn_penalty_scale: float = 0.5     # DAPO-inspired: max extra penalty added across turns for failures
+
+
+# ---------------------------------------------------------------------------
+# DAPO-inspired turn-based reward shaping
+# ---------------------------------------------------------------------------
+
+def apply_turn_decay(
+    base_reward: float,
+    turn: int,
+    max_turns: int,
+    decay_factor: float = 0.9,
+    penalty_scale: float = 0.5,
+) -> float:
+    """
+    Soft turn-based reward shaping inspired by DAPO's overlong reward shaping.
+
+    DAPO uses a graduated soft penalty for overlong responses instead of a hard
+    cliff. We apply the same principle across turns:
+
+    Correct solutions (reward >= 1.0):
+        Exponential decay incentivizes solving in fewer turns.
+        R_final = R_base * decay_factor^(turn - 1)
+        e.g. decay=0.9: turn1=1.0x, turn2=0.9x, turn3=0.81x, turn4=0.73x
+
+    Failed solutions (reward < 0):
+        Graduated extra penalty that increases linearly from 0 (turn 1) to
+        -penalty_scale (final turn), mirroring DAPO's soft overlong formula:
+            R_final = R_base - (turn - 1) / (max_turns - 1) * penalty_scale
+        e.g. scale=0.5, max_turns=4:
+            turn1: no extra, turn2: -0.17, turn3: -0.33, turn4: -0.5
+
+    Turn 1 is never additionally penalized - the model only sees the base
+    correctness reward on its first attempt.
+    """
+    if turn <= 1:
+        return base_reward
+
+    if base_reward >= 1.0:
+        # Correct: exponential decay rewards faster solutions
+        return base_reward * (decay_factor ** (turn - 1))
+    else:
+        # Failed: graduated DAPO-style penalty grows with each wasted turn
+        extra_penalty = (turn - 1) / max(max_turns - 1, 1) * penalty_scale
+        return base_reward - extra_penalty
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +138,9 @@ You are an expert GPU kernel engineer. Your task is to convert PyTorch code into
 1. SPMD PROGRAMMING MODEL
    Triton uses Single Program, Multiple Data: the SAME kernel code runs on many GPU threads simultaneously.
    Each thread (program instance) processes a different portion of data.
-
+   
    Key insight: Use tl.program_id() to determine which data THIS instance should process.
-
+   
    Example: To process array of size N with BLOCK_SIZE per program:
    - Program 0 processes elements [0, BLOCK_SIZE)
    - Program 1 processes elements [BLOCK_SIZE, 2*BLOCK_SIZE)
@@ -102,63 +148,59 @@ You are an expert GPU kernel engineer. Your task is to convert PyTorch code into
 
 2. COMPILE-TIME vs RUNTIME
    Triton kernels are COMPILED before execution. Some values must be known at compile-time.
-
+   
    COMPILE-TIME (tl.constexpr):
    - BLOCK_SIZE, num_warps, num_stages
    - Arguments to tl.arange(start, end) - both must be constants
    - Tensor shape parameters marked with : tl.constexpr
-
+   
    RUNTIME:
    - Actual data values
    - Loop bounds (range(0, N, BLOCK_SIZE) is fine - N can be runtime)
    - Loaded tensor elements
-
-   CRITICAL: tl.arange(0, BLOCK_SIZE) is valid but tl.arange(0, n) where n is runtime is NOT.
-   Solution: Use fixed BLOCK_SIZE with masking for boundaries.
+   
+   CRITICAL: tl.arange(0, BLOCK_SIZE) ✓  but  tl.arange(0, n) where n is runtime ✗
+   Solution: Use fixed BLOCK_SIZE with masking for boundaries
 
 3. MEMORY SAFETY
    GPU memory is accessed via pointers. Out-of-bounds access causes crashes.
-
+   
    Always use MASKING:
+   ```python
    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-   mask = offsets < N
-   data = tl.load(ptr + offsets, mask=mask, other=0.0)
+   mask = offsets < N  # Check boundaries
+   data = tl.load(ptr + offsets, mask=mask, other=0.0)  # Safe
+   ```
+   
+   The mask ensures we only touch valid memory locations.
 
-4. TRITON LANGUAGE SCOPE
-   Inside @triton.jit functions, you are in Triton-land:
-   - Use tl.* operations ONLY
-   - No torch.* functions
-   - No Python control flow on tensor data (use tl.where instead)
-
-   Outside (in wrapper), you are in Python-land:
-   - Use torch.* freely
-   - Allocate tensors, compute grid sizes
-   - Launch kernels
-
-5. MATRIX OPERATIONS
+4. MATRIX OPERATIONS
    tl.dot(A, B) performs matrix multiplication:
    - Requires A.shape = (M, K) and B.shape = (K, N)
    - Results in shape (M, N)
    - Use tl.trans(B) if B is (N, K) to get (K, N)
+   
+   Common pattern for GEMM:
+   ```python
+   # Load tiles
+   a = tl.load(...)  # Shape: (BLOCK_M, BLOCK_K)
+   b = tl.load(...)  # Shape: (BLOCK_N, BLOCK_K)
+   # Transpose b to match dimensions
+   b_t = tl.trans(b)  # Now: (BLOCK_K, BLOCK_N)
+   # Multiply
+   c = tl.dot(a, b_t)  # Result: (BLOCK_M, BLOCK_N)
+   ```
 
 === YOUR TASK ===
 
 For each PyTorch operation, you should:
 1. Analyze the operation and memory access patterns
 2. Think step-by-step about how to parallelize it
-3. Choose appropriate BLOCK_SIZE and num_warps
+3. Choose appropriate BLOCK_SIZE and num_warps (num_warps controls thread parallelism per block, typically 4 or 8)
 4. Write the complete Triton kernel implementation
 
-Your response MUST follow this format:
-
-<think>
-[Your step-by-step reasoning about the conversion]
-- What operation is being performed?
-- What are the input/output shapes?
-- How should this be parallelized?
-- What memory access pattern should be used?
-- What BLOCK_SIZE and num_warps are optimal?
-</think>
+Think step-by-step about the conversion before writing code. Then provide the complete
+Triton implementation inside <triton>...</triton> tags:
 
 <triton>
 import torch
@@ -179,15 +221,18 @@ def triton_kernel_wrapper(input_tensors):
 
 1. The wrapper function MUST be named `triton_kernel_wrapper`
 2. The wrapper takes the SAME inputs as Model.forward() - just the input tensors, NOT model weights
-3. If the model has weights (nn.Linear, nn.Conv2d, etc.), the wrapper should create random weights or accept them as additional parameters
-4. IMPORTANT: If get_init_inputs() returns parameters, the wrapper MUST accept these as keyword arguments with defaults matching those values
-5. Triton API Limitations: tl.tanh, tl.pow, tl.unsqueeze do NOT exist - use tl.exp for tanh, ** operator for pow, reshape for unsqueeze
+3. If the model has weights (nn.Linear, nn.Conv2d, etc.), accept them as additional parameters in the wrapper - the benchmark harness will pass the reference model's weights automatically
+4. **IMPORTANT**: If get_init_inputs() returns parameters (e.g., {'quantiles': 4, 'hidden_size': 128}), the wrapper MUST accept these as keyword arguments with defaults matching those values
+5. **Triton API Limitations**: tl.tanh, tl.pow, tl.unsqueeze do NOT exist - use tl.exp for tanh, ** operator for pow, reshape for unsqueeze
 
 === TRITON KERNEL RULES - MUST FOLLOW ===
 
-IMPORTS - Only use these:
-  import triton
-  import triton.language as tl
+IMPORTS:
+```python
+import triton
+import triton.language as tl
+import torch  # wrapper only - for tensor allocation, NEVER inside @triton.jit
+```
 
 INSIDE @triton.jit KERNELS - Use ONLY triton.language (tl) operations:
 - tl.load(), tl.store() - memory access
@@ -201,7 +246,7 @@ INSIDE @triton.jit KERNELS - Use ONLY triton.language (tl) operations:
 
 NEVER use inside @triton.jit:
 - torch.* functions (torch.sum, torch.mean, torch.relu, etc.)
-- .pow(), .sqrt(), .exp() methods on tensors - use ** operator for pow, tl.sqrt(), tl.exp()
+- .pow(), .sqrt(), .exp() methods on tensors - use ** operator for pow, tl.sqrt(), tl.exp() for others
 - Python classes or objects
 - nn.* modules
 
@@ -210,13 +255,43 @@ CONSTEXPR RULES:
 - BLOCK_SIZE: tl.constexpr in kernel signature
 - Use powers of 2: 64, 128, 256, 512, 1024
 
+REDUCTION PATTERN:
+```python
+# CORRECT - accumulate in block-sized buffer, reduce once at end
+acc = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
+for i in range(0, N, BLOCK_SIZE):
+    offsets = i + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < N
+    x = tl.load(ptr + offsets, mask=mask, other=0.0)
+    acc += x
+result = tl.sum(acc)
+
+# WRONG - shape mismatch in loop
+acc = tl.zeros([1], dtype=tl.float32)
+acc += tl.sum(x)  # ERROR: shape changes!
+```
+
 WRAPPER FUNCTION PATTERN:
-  def triton_kernel_wrapper(x):
-      output = torch.empty_like(x)
-      BLOCK_SIZE = 1024
-      grid = lambda meta: (triton.cdiv(x.numel(), meta['BLOCK_SIZE']),)
-      my_kernel[grid](x, output, x.numel(), BLOCK_SIZE=BLOCK_SIZE)
-      return output
+```python
+def triton_kernel_wrapper(x):
+    B, C = x.shape
+    output = torch.empty((B, C), dtype=x.dtype, device=x.device)
+
+    # Dimension args to torch.empty/randn/zeros must be Python ints:
+    # CORRECT: torch.empty((B, C), ...)       -- B, C are ints from shape unpacking
+    # CORRECT: torch.randn(int(N), int(M))    -- explicit int() conversion
+    # WRONG:   torch.randn(some_tensor, ...)   -- Tensor as shape arg crashes
+
+    # Never use a multi-element Tensor in a Python if/while:
+    # WRONG:   if some_tensor:
+    # CORRECT: if some_tensor.item() > 0:
+
+    BLOCK_SIZE = 1024
+    grid = (triton.cdiv(x.numel(), BLOCK_SIZE),)
+    my_kernel[grid](x, output, x.numel(), BLOCK_SIZE=BLOCK_SIZE)
+
+    return output
+```
 
 COMMON OPERATIONS:
 - ReLU: tl.maximum(x, 0.0)
@@ -225,6 +300,9 @@ COMMON OPERATIONS:
 - Softmax: exp_x = tl.exp(x - tl.max(x)); exp_x / tl.sum(exp_x)
 - Mean: tl.sum(x) / n_elements
 
+USE ASCII ONLY - no unicode characters like – or —, use - instead.
+
+
 === MULTI-TURN FEEDBACK ===
 
 You may receive feedback on your generated kernel if it fails validation
@@ -232,8 +310,6 @@ or is slower than PyTorch. When you receive feedback, analyze the error
 or performance issue, then generate an improved version. Always provide
 the corrected code inside <triton>...</triton> tags.
 """
-
-
 # ---------------------------------------------------------------------------
 # Tag extraction utilities
 # ---------------------------------------------------------------------------
@@ -249,6 +325,7 @@ def extract_triton(content: str) -> str | None:
 
 
 def format_reward(content: str) -> float:
+    """Format bonus: rewards the model for using proper <think> + <triton> structure."""
     has_think = bool(re.search(r"<think>.*?</think>", content, re.DOTALL))
     has_triton = bool(re.search(r"<triton>.*?</triton>", content, re.DOTALL))
     if has_think and has_triton:
@@ -273,17 +350,35 @@ def save_rollout_to_jsonl(log_path: str, data: dict):
 benchmark_kernelbench = modal.Function.from_name("kernelbench-triton", "benchmark_kernelbench")
 
 
-def get_reward_with_result(content: str, pytorch_code: str) -> tuple[float, dict]:
+def get_reward_with_result(
+    content: str,
+    pytorch_code: str,
+    turn: int = 1,
+    max_turns: int = 1,
+    decay_factor: float = 0.9,
+    penalty_scale: float = 0.5,
+) -> tuple[float, dict]:
     """
-    Like get_reward but also returns the Modal benchmark result dict
-    for feedback construction.
+    Single reward function combining all reward signals:
+      1. Format reward  - bonus for using <think> + <triton> structure
+      2. Correctness    - benchmark result from Modal
+      3. Speedup bonus  - log(speedup) for correct & fast kernels
+      4. Turn decay     - DAPO-inspired shaping applied to the total
+
+    Defaults (turn=1, max_turns=1) mean no turn decay - safe for eval/single-turn.
     """
+    fmt_bonus = format_reward(content)
+
     triton_code = extract_triton(content)
     if triton_code is None:
-        return 0.0, {"correctness": False, "error": "No <triton> tags found"}
+        base = fmt_bonus  # only format reward (0.0 since no triton tag)
+        result = {"correctness": False, "error": "No <triton> tags found"}
+        return apply_turn_decay(base, turn, max_turns, decay_factor, penalty_scale), result
 
     if "def triton_kernel_wrapper" not in triton_code:
-        return -0.5, {"correctness": False, "error": "Missing triton_kernel_wrapper"}
+        base = fmt_bonus - 0.5  # format bonus + structure penalty
+        result = {"correctness": False, "error": "Missing triton_kernel_wrapper"}
+        return apply_turn_decay(base, turn, max_turns, decay_factor, penalty_scale), result
 
     try:
         result = benchmark_kernelbench.remote(
@@ -297,18 +392,21 @@ def get_reward_with_result(content: str, pytorch_code: str) -> tuple[float, dict
         )
 
         if result.get("error"):
-            return -0.5, result
+            base = fmt_bonus - 0.5
+            return apply_turn_decay(base, turn, max_turns, decay_factor, penalty_scale), result
 
         if not result["correctness"]:
-            return -0.5, result
+            base = fmt_bonus - 0.5
+            return apply_turn_decay(base, turn, max_turns, decay_factor, penalty_scale), result
 
         speedup = result.get("speedup", 1.0)
         speedup_bonus = max(0.0, min(4.0, math.log(max(speedup, 1e-6))))
-        reward = 1.0 + speedup_bonus
-        return reward, result
+        base = fmt_bonus + 1.0 + speedup_bonus
+        return apply_turn_decay(base, turn, max_turns, decay_factor, penalty_scale), result
 
     except Exception as e:
-        return -0.5, {"correctness": False, "error": str(e)}
+        base = fmt_bonus - 0.5
+        return apply_turn_decay(base, turn, max_turns, decay_factor, penalty_scale), {"correctness": False, "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +442,8 @@ def run_multiturn_trajectory(
     max_turns: int,
     queue: MultiTurnQueue,
     tokenizer,
+    turn_decay_factor: float = 0.9,
+    turn_penalty_scale: float = 0.5,
 ) -> tuple[float, list[int], list[float], list[float], int, dict]:
     """
     Run a single multi-turn trajectory for one sequence.
@@ -406,6 +506,7 @@ def run_multiturn_trajectory(
         assert sampled_logprobs is not None
 
         # Append model-generated tokens
+        #.extend basically concatenates the lists (so it becomes all tokens + all logprobs + all advantage)
         all_tokens.extend(sampled_tokens)
         all_logprobs.extend(sampled_logprobs)
         all_advantage_mask.extend([1.0] * len(sampled_tokens))
@@ -414,12 +515,11 @@ def run_multiturn_trajectory(
         parsed_message, _ = renderer.parse_response(sampled_tokens)
         content = renderers.get_text_content(parsed_message)
 
-        fmt_r = format_reward(content)
-        if fmt_r < 0.5:
-            reward = 0.0
-            result = {"correctness": False, "error": "No valid <triton> tags"}
-        else:
-            reward, result = get_reward_with_result(content, pytorch_code)
+        reward, result = get_reward_with_result(
+            content, pytorch_code,
+            turn=turn, max_turns=max_turns,
+            decay_factor=turn_decay_factor, penalty_scale=turn_penalty_scale,
+        )
 
         turn_record = {
             "turn": turn,
@@ -598,6 +698,8 @@ def main(config: Config):
                         max_turns=config.max_turns,
                         queue=queue,
                         tokenizer=tokenizer,
+                        turn_decay_factor=config.turn_decay_factor,
+                        turn_penalty_scale=config.turn_penalty_scale,
                     )
 
                 rewards_G.append(final_reward)

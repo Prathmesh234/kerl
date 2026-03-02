@@ -63,7 +63,7 @@ class Config:
     batch_size: int = 4          # problems per GRPO batch
     group_size: int = 8           # completions per problem
     learning_rate: float = 2e-5
-    lora_rank: int = 32           # reduced from 128 to prevent overfitting
+    lora_rank: int = 16        # reduced from 128 to prevent overfitting
     save_every: int = 40
     max_tokens: int = 16384
     keep_last_sampler_checkpoints: int = 2

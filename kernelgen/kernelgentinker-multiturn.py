@@ -65,13 +65,13 @@ logging.getLogger("httpx").setLevel(logging.WARN)
 @chz.chz
 class Config:
     base_url: str | None = None
-    log_path: str = "./tmp/kernelbench-grpo-multiturn-qwen3-32b"
-    model_name: str = "Qwen/Qwen3-32B"
+    log_path: str = "./tmp/kernelbench-grpo-multiturn-qwen3-8b"
+    model_name: str = "Qwen/Qwen3-8B"
     sft_checkpoint_path: str | None = None   # pass in sampler weights from SFT to warm-start
     batch_size: int = 4          # problems per GRPO batch
     group_size: int = 8           # completions per problem (multi-turn trajectories)
     learning_rate: float = 2e-5
-    lora_rank: int = 32           # reduced from 128 to prevent overfitting
+    lora_rank: int = 16         # reduced from 128 to prevent overfitting
     save_every: int = 40
     max_tokens: int = 16384
     keep_last_sampler_checkpoints: int = 2
@@ -343,6 +343,35 @@ def save_rollout_to_jsonl(log_path: str, data: dict):
         f.write(json.dumps(data, default=str) + "\n")
 
 
+def save_failed_task(log_path: str, problem: dict):
+    """Append a problem (all group trajectories failed) to the failed tasks buffer."""
+    os.makedirs(log_path, exist_ok=True)
+    filepath = os.path.join(log_path, "failed_tasks.jsonl")
+    entry = {
+        "code": problem["code"],
+        "level": problem["level"],
+        "name": problem["name"],
+        "problem_id": problem["problem_id"],
+    }
+    with open(filepath, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def load_and_clear_failed_tasks(log_path: str) -> list[dict]:
+    """Load all buffered failed tasks and clear the file for the next run."""
+    filepath = os.path.join(log_path, "failed_tasks.jsonl")
+    if not os.path.exists(filepath):
+        return []
+    tasks = []
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                tasks.append(json.loads(line))
+    open(filepath, "w").close()  # clear after loading
+    return tasks
+
+
 # ---------------------------------------------------------------------------
 # Modal benchmark client
 # ---------------------------------------------------------------------------
@@ -593,6 +622,10 @@ def main(config: Config):
     n_train_batches = len(train_problems) // config.batch_size
     logger.info(f"Training: {n_train_batches} batches of {config.batch_size} problems, max_turns={config.max_turns}")
 
+    # Mutable queue - failed tasks will be appended after all original batches complete
+    problems_queue = list(train_problems)
+    _requeue_appended = False
+
     # -------------------------------------------------------------------------
     # Tinker client setup
     # -------------------------------------------------------------------------
@@ -635,7 +668,8 @@ def main(config: Config):
     # -------------------------------------------------------------------------
     # Training loop
     # -------------------------------------------------------------------------
-    for batch_idx in range(start_batch, n_train_batches):
+    batch_idx = start_batch
+    while batch_idx * config.batch_size < len(problems_queue):
         t_start = time.time()
         metrics: dict[str, float] = {
             "progress/batch": batch_idx,
@@ -667,7 +701,7 @@ def main(config: Config):
 
         # Get batch of problems
         batch_start = batch_idx * config.batch_size
-        batch_problems = train_problems[batch_start : batch_start + config.batch_size]
+        batch_problems = problems_queue[batch_start : batch_start + config.batch_size]
 
         # -----------------------------------------------------------------
         # Step 1+2: Multi-turn sampling + reward collection
@@ -719,6 +753,10 @@ def main(config: Config):
                     "final_reward": final_reward,
                     "turns": turn_history,
                 })
+
+            # Buffer problems where no group member produced a correct kernel
+            if not any(r >= 1.0 for r in rewards_G):
+                save_failed_task(config.log_path, problem)
 
             # GRPO: advantages = reward - group_mean
             mean_reward = sum(rewards_G) / len(rewards_G)
@@ -786,6 +824,16 @@ def main(config: Config):
             f"avg_turns={avg_turns:.1f} | datums={len(datums_D)} | "
             f"time={metrics['time/total']:.1f}s"
         )
+
+        # After completing the original batches, append failed tasks back to the queue
+        if not _requeue_appended and batch_idx + 1 >= n_train_batches:
+            failed_tasks = load_and_clear_failed_tasks(config.log_path)
+            if failed_tasks:
+                problems_queue.extend(failed_tasks)
+                logger.info(f"Re-queuing {len(failed_tasks)} fully-failed tasks (appended to queue)")
+            _requeue_appended = True
+
+        batch_idx += 1
 
     # -------------------------------------------------------------------------
     # Final checkpoint

@@ -1,0 +1,35 @@
+[project]
+name = "skyrl-kernelgen"
+version = "0.1.0"
+description = "KernelGen multi-turn GRPO - SkyRL (local Tinker-compatible server) edition"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "aiofiles==25.1.0",
+    "beautifulsoup4==4.14.3",
+    "boto3==1.40.61",
+    "chz>=0.4.0",
+    "datasets>=4.5.0",
+    "modal>=1.3.3",
+    "nest-asyncio>=1.6.0",
+    "openai==2.21.0",
+    "pytest==9.0.2",
+    "python-dotenv==1.2.1",
+    "torch>=2.10.0",
+    "wandb>=0.25.0",
+    "tinker>=0.13.1",
+]
+
+# tinker is the CLIENT library (unchanged from original).
+# SkyRL is the local SERVER that implements the Tinker REST API.
+#
+# To set up the SkyRL server (run once):
+#   uv run start_server.sh
+# or manually:
+#   git clone https://github.com/NovaSky-AI/SkyRL
+#   cd SkyRL && uv venv --python 3.12 && uv sync --extra tinker --extra fsdp
+#   uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
+#       --base-model "Qwen/Qwen3-8B" --backend fsdp --port 8000
+
+[tool.uv.sources]
+tinker = { git = "https://github.com/thinking-machines-lab/tinker.git", rev = "a187cb5b2f2ad0f3eef6b93eab2770edcf0f01c7" }

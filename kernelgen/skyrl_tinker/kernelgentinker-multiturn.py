@@ -64,9 +64,9 @@ logging.getLogger("httpx").setLevel(logging.WARN)
 
 @chz.chz
 class Config:
-    base_url: str | None = None
-    log_path: str = "./tmp/kernelbench-grpo-multiturn-qwen3-32b"
-    model_name: str = "Qwen/Qwen3-32B"
+    base_url: str = "http://localhost:8000"   # SkyRL local server (start with ./start_server.sh)
+    log_path: str = "./tmp/kernelbench-grpo-multiturn-qwen3-8b"
+    model_name: str = "Qwen/Qwen3-8B"
     sft_checkpoint_path: str | None = None   # pass in sampler weights from SFT to warm-start
     batch_size: int = 2       # problems per GRPO batch
     group_size: int = 4           # completions per problem (multi-turn trajectories)
@@ -600,7 +600,7 @@ def main(config: Config):
     # -------------------------------------------------------------------------
     ml_logger = ml_log.setup_logging(
         log_dir=config.log_path,
-        wandb_project="kernelgen-grpo-multiturn-qwen3-32b",
+        wandb_project="kernelgen-grpo-multiturn-qwen3-8b",
         wandb_name="kernelgen-grpo-multiturn-run",
         config=config,
         do_configure_logging_module=True,
